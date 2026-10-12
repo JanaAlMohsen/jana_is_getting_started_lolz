@@ -22,4 +22,4 @@ Your own copy of the lab notebooks. Commit your work and data files here every l
 - **Never commit** camera or calibration files you did not make, videos, or anything containing personal data.
 - The assessment repository (issued in week 6) is separate. Copy across any code you want to reuse; it is not linked to this one.
 
-Released so far: week 1.
+Released so far: weeks 1 to 2.

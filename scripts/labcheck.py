@@ -47,6 +47,9 @@ def try_it(label, value, expected, tol=1e-6):
             print(f'  ..  {label}: not done yet - replace the ... in the cell above (a function that returns nothing gives None)')
             return None
         a, b = _arr(value), _arr(expected)
+    except NotImplementedError:
+        print(f'  ..  {label}: not done yet - it uses a task function that is still TODO')
+        return None
     except Exception as e:
         if 'ellipsis' in str(e).lower() or 'nonetype' in str(e).lower():
             print(f'  ..  {label}: not done yet - something it uses is still ...')
