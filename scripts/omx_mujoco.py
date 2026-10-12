@@ -26,8 +26,8 @@ What is modelled
     position mode; kp, kv, friction and armature are the parameters Lab 8 identifies.
   * Work cell: bench, base plate A, top frame B, the printed mat as a textured plane at z = 0 (base frame),
     optional mat placement error.
-  * Wrist camera: MuJoCo camera at T_EC_TWIN (the first arm's measured mount, 62 deg below the gripper axis; the model's
-    T_EC is the CAD value, T_EC_true=T_EC_NOMINAL gives a camera that matches it) with fovy chosen to match a given focal
+  * Wrist camera: MuJoCo camera at T_EC_TWIN (the ROBOTIS CAD camera on its bracket, 38 deg below the gripper axis
+    = the design mount omx_model.T_EC; T_EC_error= makes it differ, as on a real arm) with fovy chosen to match a given focal
     length; OpenCV-convention intrinsics available as SimCamera.K. Zero distortion.
   * Hidden truth: pass kin_error / joint_offsets / T_EC_error / mat_error to make the "real" arm differ from the
     nominal model, then test the calibration pipeline against ground_truth().
@@ -72,20 +72,17 @@ REST_VIA_Q = np.radians([0.0, -60.0, 60.0, -5.0])              # = omx_model.RES
 # roll axis (locked joint 5) and finger root along link 4
 J1_Z = 0.034; BASE_X = -0.01125; ROLL_X = 0.0287; FINGER_X = 0.0295; FINGER_Y = (0.0075, -0.0108)
 FINGER_OPEN_DEG = 30.0  # fingers fixed OPEN, turned about their pivots (URDF gripper_joint_1, _2 mirrored): as on the real arm, the
-                        # gripper stays open for camera work; closed (0), they fill the view of a camera at the measured mount
+                        # gripper stays open for camera work; closed (0), they hide most of the mat from the wrist camera
 STALL_TORQUE = np.array([1.4, 1.4, 1.4, 0.52])       # XL430-W250 x3, XL330-M288 (N m)
 STALL_CURRENT_A = np.array([1.3, 1.3, 1.3, 1.47])
-R_EC = np.array([[0, 0, 1], [-1, 0, 0], [0, -1, 0]])          # camera axes in {E} (columns), see omx_model.py
-T_EC_NOMINAL = np.eye(4); T_EC_NOMINAL[:3, :3] = R_EC; T_EC_NOMINAL[:3, 3] = [-0.030, 0.0, 0.040]   # = omx_model.T_EC (CAD)
-# The twin's TRUE camera mount, as measured on the first arm (baseline calibration, 30 Sep 2026: optical axis 61.7-61.9 deg
-# below the gripper axis, camera at ~(-23, -2, 20) mm in {E}): the students' model keeps the CAD T_EC and, as on the real
-# arm, has to find this (Lab 2 Part D, refined in Lab 9). Pass T_EC_true=T_EC_NOMINAL for a twin whose camera matches the model.
+_a = np.radians(38.0)                                                          # = omx_model.MOUNT_DEG (ROBOTIS CAD camera)
+T_EC_NOMINAL = np.eye(4)                                                       # = omx_model.T_EC (the design mount)
+T_EC_NOMINAL[:3, :3] = [[0, -np.sin(_a), np.cos(_a)], [-1, 0, 0], [0, -np.cos(_a), -np.sin(_a)]]
+T_EC_NOMINAL[:3, 3] = [-0.0459, 0.0, 0.0332]
+# The twin's TRUE camera mount: the design mount (pass T_EC_error to make it differ, as on a real arm, for calibration practice).
 # Copied in tasks.T_EC_TWIN_A (synthetic camera frames); check_consistency keeps them equal.
-TWIN_MOUNT_DEG = 62.0
-_a = np.radians(TWIN_MOUNT_DEG)
-T_EC_TWIN = np.eye(4)
-T_EC_TWIN[:3, :3] = [[0, -np.sin(_a), np.cos(_a)], [-1, 0, 0], [0, -np.cos(_a), -np.sin(_a)]]
-T_EC_TWIN[:3, 3] = [-0.023, -0.002, 0.020]
+TWIN_MOUNT_DEG = 38.0
+T_EC_TWIN = T_EC_NOMINAL.copy()
 TORQUE_PER_AMP = STALL_TORQUE / STALL_CURRENT_A     # per joint
 RAD_PER_TICK = 2 * np.pi / 4096
 VEL_UNIT = 0.229 * 2 * np.pi / 60          # rad/s per Dynamixel profile-velocity unit
@@ -215,7 +212,6 @@ def build_mjcf(kin=NOMINAL, T_EC=T_EC_NOMINAL, mat_T=np.eye(4), cam_res=(1280, 7
               </body>
               <site name="ee" pos="{l4:.5f} 0 0" size="0.003"/>
               <camera name="wrist" pos="{cam_pos[0]:.5f} {cam_pos[1]:.5f} {cam_pos[2]:.5f}" quat="{_quat_wxyz(R_mj)}" fovy="{fovy:.4f}"/>
-              <geom type="box" size="0.012 0.012 0.008" pos="{cam_pos[0]:.5f} {cam_pos[1]:.5f} {cam_pos[2]:.5f}" mass="0.03" rgba="0.2 0.2 0.25 1"/>
             </body>
           </body>
         </body>

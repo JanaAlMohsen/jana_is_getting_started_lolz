@@ -37,6 +37,7 @@ from spatialmath import SE3
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MAT_FILE = os.path.join(HERE, 'mat_markers.json')
+STALE_AFTER_S = 0.25   # Camera.read() after a gap this long (an arm move) first throws one decoded image away: it is from before the gap
 
 
 def mat_scale_setting():
@@ -101,6 +102,7 @@ class Camera:
         if not self.cap.isOpened():
             raise IOError(f'camera {self.name or index} not found')
         self.K = self.dist = None
+        self._t_read = 0.0                                          # time of the last read (stale-frame guard)
         if intrinsics is not None:
             self.load_intrinsics(intrinsics)
         self.meta, self.corners_M = load_mat(mat_file, mat_scale)     # mat_scale None: ELEC3901_MAT_SCALE or 1.0
@@ -223,11 +225,21 @@ class Camera:
         t0 = _t.time()
         while _t.time() - t0 < seconds:
             self.cap.grab()
+        self.cap.read()                                 # grab() alone left one stale image on the first arm: decode one too
+        self._t_read = _t.time()
 
     def read(self, flush=3):
+        """The current image. After a gap of more than STALE_AFTER_S since the last read (e.g. an arm move) one decoded image is
+        thrown away first: on the first arm (OMX-00, 9 Oct 2026) the first image after a move was from BEFORE it - up to 229 mm off
+        in C_T_M - even after drain(0.3) and the flushed grabs, and one discarded decoded read removed it. Back-to-back reads (live
+        view, calibration) do not pay for it."""
+        import time as _t
+        if _t.time() - self._t_read > STALE_AFTER_S:
+            self.cap.read()
         for _ in range(flush):                          # drop buffered frames so the image matches 'now'
             self.cap.grab()
         ok, frame = self.cap.read()
+        self._t_read = _t.time()
         if not ok:
             raise IOError('frame grab failed')
         return frame
