@@ -32,7 +32,7 @@ from scipy.spatial.transform import Rotation as Rot
 
 from omx_model import omx_ik, T_EC, Q_LIM, HOME_Q
 from omx_calib import fk_np, NOMINAL
-from omx_camera import load_mat
+from omx_camera import load_mat, LiveWindow
 
 K_NOMINAL = np.array([[950.0, 0, 640], [0, 950.0, 360], [0, 0, 1]])
 SIZE = (1280, 720)
@@ -255,14 +255,8 @@ class Viewer:
     """Live camera window, kept on top and refreshed constantly (during moves, settling and capture). show=False: no-op."""
 
     def __init__(self, cam, show, title='ELEC3901 automatic camera calibration (q to stop)'):
-        self.cam, self.on, self.win, self.stop, self.kept = cam, show, title, False, 0
-        if show:
-            cv2.namedWindow(self.win, cv2.WINDOW_NORMAL)
-            cv2.resizeWindow(self.win, 960, 540)
-            try:
-                cv2.setWindowProperty(self.win, cv2.WND_PROP_TOPMOST, 1)      # in front of VS Code / Jupyter
-            except cv2.error:
-                pass
+        self.cam, self.on, self.stop, self.kept = cam, show, False, 0
+        self.win = LiveWindow(title, size=(960, 540), topmost=True) if show else None   # inline on macOS in a notebook
 
     def frame(self, frame=None, lines=(), flash=False):
         """Show frame (grabbed now if None) with markers outlined and status lines. Returns the frame."""
@@ -278,14 +272,13 @@ class Viewer:
         for k, txt in enumerate([f'kept {self.kept}   {len(i)} markers in view'] + list(lines)):
             cv2.putText(vis, txt, (12, 36 + 32 * k), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (0, 0, 0), 5)
             cv2.putText(vis, txt, (12, 36 + 32 * k), cv2.FONT_HERSHEY_SIMPLEX, 0.85, (0, 255, 0), 2)
-        cv2.imshow(self.win, vis)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
+        if self.win.show(vis) == ord('q'):
             self.stop = True
         return frame
 
     def close(self):
         if self.on:
-            cv2.destroyWindow(self.win); cv2.waitKey(1)
+            self.win.close()
 
 
 def move_and_watch(arm, q, viewer, label, tol=0.02, still_tol=0.003, still_s=0.3, timeout=8.0, roll=None):

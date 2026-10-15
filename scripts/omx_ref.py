@@ -49,3 +49,59 @@ def trot2(theta):
 def rot_about(theta, c):
     """3x3 homogeneous transform: rotation by theta (rad) about the point c = (cx, cy)."""
     return transl2(c[0], c[1]) @ trot2(theta) @ transl2(-c[0], -c[1])
+
+# ---- Lab 2 Task 1: Rotations in 3D and roll-pitch-yaw angles
+def rotx(a):
+    """3x3 rotation about x by a (rad)."""
+    c, s = np.cos(a), np.sin(a); return np.array([[1, 0, 0], [0, c, -s], [0, s, c]])
+
+def roty(a):
+    """3x3 rotation about y by a (rad)."""
+    c, s = np.cos(a), np.sin(a); return np.array([[c, 0, s], [0, 1, 0], [-s, 0, c]])
+
+def rotz(a):
+    """3x3 rotation about z by a (rad). GIVEN - the worked example: the columns are where x and y go, z stays put."""
+    c, s = np.cos(a), np.sin(a)
+    return np.array([[c, -s, 0],      # column 0: x turns to (cos a, sin a, 0)
+                     [s, c, 0],       # column 1: y turns to (-sin a, cos a, 0)
+                     [0, 0, 1]])      # column 2: z is the axis - it does not move
+
+def rpy_to_R(roll, pitch, yaw):
+    """zyx roll-pitch-yaw (rad) -> 3x3 rotation matrix."""
+    return rotz(yaw) @ roty(pitch) @ rotx(roll)
+
+def R_to_rpy(R):
+    """3x3 rotation matrix -> [roll, pitch, yaw] (rad), zyx convention. Assume |pitch| < 90 deg."""
+    pitch = np.arctan2(-R[2, 0], np.hypot(R[0, 0], R[1, 0]))
+    roll = np.arctan2(R[2, 1], R[2, 2]); yaw = np.arctan2(R[1, 0], R[0, 0])
+    return np.array([roll, pitch, yaw])
+
+# ---- Lab 2 Task 2: Pose in 3D: build, invert and apply a transform
+def make_T(R, t):
+    """3x3 rotation, 3-vector -> 4x4 homogeneous transform."""
+    T = np.eye(4); T[:3, :3] = R; T[:3, 3] = t
+    return T
+
+def inv_T(T):
+    """Inverse of a 4x4 homogeneous transform, from R^T and -R^T t (no general matrix inverse)."""
+    R, t = T[:3, :3], T[:3, 3]
+    Ti = np.eye(4); Ti[:3, :3] = R.T; Ti[:3, 3] = -R.T @ t
+    return Ti
+
+def transform_points(T, P):
+    """Map point(s) P ((3,) or N x 3) through the 4x4 transform T; returns the same shape."""
+    P = np.asarray(P, float)
+    out = (T[:3, :3] @ np.atleast_2d(P).T).T + T[:3, 3]
+    return out[0] if P.ndim == 1 else out
+
+# ---- Lab 2 Task 3: Chaining a camera measurement to the base frame - and measuring the camera mount
+def chain_T_BM(T_BE, T_EC, T_CM):
+    """All 4x4 NumPy arrays. Returns T_BM."""
+    return T_BE @ T_EC @ T_CM
+
+def mount_from_views(T_BEs, T_CMs, T_BM=np.eye(4)):
+    """Lists of 4x4 arrays (one pair per view) -> 4x4 camera mount T_EC averaged over the views."""
+    Ts = [np.linalg.inv(T_BE) @ T_BM @ np.linalg.inv(T_CM) for T_BE, T_CM in zip(T_BEs, T_CMs)]
+    U, _, Vt = np.linalg.svd(np.mean([T[:3, :3] for T in Ts], axis=0))
+    T = np.eye(4); T[:3, :3] = U @ np.diag([1, 1, np.linalg.det(U @ Vt)]) @ Vt; T[:3, 3] = np.mean([T[:3, 3] for T in Ts], axis=0)
+    return T

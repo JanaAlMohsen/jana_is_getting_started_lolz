@@ -296,8 +296,7 @@ class OMXSim:
             self.data.qpos[:4] = REST_Q + self.off
         mujoco.mj_forward(self.model, self.data)
         if view:
-            from mujoco import viewer as mj_viewer        # not "import mujoco.viewer": that rebinds mujoco as a local
-            self.viewer = mj_viewer.launch_passive(self.model, self.data)
+            self.viewer = open_viewer(self.model, self.data)
 
     # ---- internals ----------------------------------------------------------
     def _servo_loop(self):
@@ -341,6 +340,7 @@ class OMXSim:
 
     def settle(self, seconds=1.0):
         self.step(int(seconds / self.dt))
+        self._show_final()
 
     # ---- OMX-compatible API -------------------------------------------------
     def torque(self, on, ids=None):
@@ -414,6 +414,12 @@ class OMXSim:
                 self.step(10); n += 10
                 if np.max(np.abs(self.data.qpos[:4] - self.q_goal)) < tol and np.max(np.abs(self.data.qvel[:4])) < 0.05:
                     break
+            self._show_final()
+
+    def _show_final(self):
+        """The inline viewer refreshes a few times a second of wall clock, and a move runs faster than that: show where it ended."""
+        if isinstance(self.viewer, InlineViewer):
+            self.viewer.sync(final=True)
 
     def stream(self, qs, dt):
         log_t, log_q = [], []
@@ -422,6 +428,7 @@ class OMXSim:
             self.move_q(q)
             log_t.append(k * dt); log_q.append(self.read_q())
             self.step(n)
+        self._show_final()
         return np.array(log_t), np.array(log_q)
 
     def gripper(self, open_=True):
@@ -561,6 +568,68 @@ class OMXSim:
         return np.array([[f, 0, W / 2], [0, f, H / 2], [0, 0, 1]]), np.zeros(5)
 
 
+class InlineViewer:
+    """Stands in for the MuJoCo viewer where it cannot open (macOS notebooks: the viewer needs mjpython): the scene and the
+    wrist camera side by side as a picture in the cell output, refreshed a few times a second while the twin runs. A new
+    picture starts in each cell in which the arm moves. Same calls as the passive viewer: sync(), is_running(), close()."""
+
+    def __init__(self, model, data, size=(480, 270), lookat=(0.20, 0.0, 0.10), distance=0.8, azimuth=-35.0, elevation=-20.0):
+        from omx_camera import InlineImage
+        self.data, self.size = data, (int(size[0]), int(size[1]))
+        self.renderer = mujoco.Renderer(model, height=self.size[1], width=self.size[0])
+        self.cam = mujoco.MjvCamera(); self.cam.type = mujoco.mjtCamera.mjCAMERA_FREE
+        self.cam.lookat[:] = lookat; self.cam.distance = distance; self.cam.azimuth = azimuth; self.cam.elevation = elevation
+        self.pic = InlineImage(period=0.2, width=2 * self.size[0])
+        self.q_shown, self.running = None, True
+        self.sync(force=True)
+
+    def sync(self, force=False, final=False):
+        """Refresh if a refresh period has passed (or final: the end of a move); not in a cell where the arm has not moved."""
+        if not self.running or not (force or final or self.pic.due()):
+            return
+        q = self.data.qpos.copy()
+        if (not force and self.pic.cell != self.pic.current_cell() and self.q_shown is not None
+                and np.max(np.abs(q - self.q_shown)) < 0.01):
+            return                                    # a cell that only reads the arm (it may still creep within move_q's tol): no new picture
+        r = self.renderer
+        r.update_scene(self.data, camera=self.cam); scene = r.render()
+        r.update_scene(self.data, camera='wrist'); wrist = r.render()
+        img = np.hstack([scene, wrist])[..., ::-1].copy()
+        img[:, self.size[0] - 1:self.size[0] + 1] = 255
+        self.pic.show(img, force=True); self.q_shown = q
+
+    def is_running(self):
+        return self.running
+
+    def close(self):
+        if self.running:
+            self.sync(force=True); self.renderer.close(); self.running = False
+
+
+def open_viewer(model, data):
+    """The MuJoCo passive viewer; on macOS in a notebook (or ELEC3901_INLINE=1) an InlineViewer; None (headless, with a
+    message) if no viewer can open, e.g. a macOS script run with python instead of mjpython."""
+    import sys
+    try:
+        from omx_camera import use_inline, in_notebook
+    except ImportError:
+        use_inline = in_notebook = lambda: False
+    if use_inline():
+        print('Digital twin: the scene and the wrist camera are shown below each cell that moves the arm '
+              '(the MuJoCo viewer window needs mjpython on macOS).')
+        return InlineViewer(model, data)
+    try:
+        from mujoco import viewer as mj_viewer        # not "import mujoco.viewer": that rebinds mujoco as a local
+        return mj_viewer.launch_passive(model, data)
+    except Exception as e:
+        if in_notebook():
+            print(f'MuJoCo viewer not available ({e}); showing the twin below the cells instead.')
+            return InlineViewer(model, data)
+        hint = ' On macOS run the script with mjpython instead of python.' if sys.platform == 'darwin' else ''
+        print(f'MuJoCo viewer not available ({e}); running without a window.{hint}')
+        return None
+
+
 JOINT_INDEX = {11: 0, 12: 1, 13: 2, 14: 3}
 
 
@@ -598,7 +667,9 @@ try:
         def show(self, T_EC=None):
             frame = self.read(); corners, ids = self.detect(frame)
             cv2.aruco.drawDetectedMarkers(frame, corners, ids.reshape(-1, 1) if len(ids) else None)
-            cv2.imshow('sim wrist camera', frame); cv2.waitKey(1)
+            if getattr(self, '_win', None) is None:
+                self._win = __import__('omx_camera').LiveWindow('sim wrist camera')
+            self._win.show(frame, force=True)
 
         def close(self):
             pass
