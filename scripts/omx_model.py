@@ -37,17 +37,21 @@ REST_Q = np.radians([-30.0, -55.0, 95.0, -5.0])
 REST_VIA_Q = np.radians([0.0, -60.0, 60.0, -5.0])
 
 # --- wrist camera and tool offsets -------------------------------------------
-# Camera pose in the end-effector frame {E} (x along link 4), from CAD - VERIFY, refined in Lab 9.
-# Camera axes in {E}: optical axis z_C = +x_E (looks along the tool), x_C = -y_E, y_C = -z_E.
-R_EC = np.array([[0, 0, 1],
+# Camera pose in the end-effector frame {E} (x along link 4): the DESIGN value of the wrist-camera mount, from the ROBOTIS CAD
+# (camera on its bracket above the gripper, labs/assets/omx_f/follower_06_pan_Revised.stl: lens axis 38.05 deg below the tool, lens
+# front at (48.4, 0, 33.2) mm in the wrist-roll body = (-45.9, 0, 33.2) mm in {E}). Each arm's camera sits a little differently (the
+# first arm's broken mount measured ~62 deg), so the notebooks measure it every session (Lab 2 Part E, the MOUNT cell); Lab 9 refines it.
+# Camera axes in {E}: x_C = -y_E; the optical axis z_C is the tool axis x_E turned MOUNT_DEG down (about y_E); y_C completes the frame.
+MOUNT_DEG = 38.0
+_m = np.radians(MOUNT_DEG)
+R_EC = np.array([[0, -np.sin(_m), np.cos(_m)],
                  [-1, 0, 0],
-                 [0, -1, 0]])             # columns = camera axes (x_C, y_C, z_C) expressed in {E}
-T_EC = SE3.Rt(R_EC, [-0.030, 0.0, 0.040])  # camera 30 mm behind and 40 mm above the EE point - a CAD PLACEHOLDER: real mounts differ
-                                           # (first arm: optical axis ~62 deg below the tool); Lab 2 measures yours
+                 [0, -np.cos(_m), -np.sin(_m)]])     # columns = camera axes (x_C, y_C, z_C) expressed in {E}
+T_EC = SE3.Rt(R_EC, [-0.0459, 0.0, 0.0332])        # lens 45.9 mm behind and 33.2 mm above the EE point (CAD)
 
 
 def mount_tilt(T_EC):
-    """Angle (rad) of the camera's optical axis below the tool axis x_E for a mount T_EC (SE3 or 4x4); 0 for the CAD placeholder."""
+    """Angle (rad) of the camera's optical axis below the tool axis x_E for a mount T_EC (SE3 or 4x4); MOUNT_DEG for the design mount."""
     z = np.asarray(getattr(T_EC, 'A', T_EC))[:3, 2]
     return float(np.arctan2(-z[2], z[0]))
 

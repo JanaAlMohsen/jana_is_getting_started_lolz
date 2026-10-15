@@ -26,14 +26,22 @@ What is modelled
     position mode; kp, kv, friction and armature are the parameters Lab 8 identifies.
   * Work cell: bench, base plate A, top frame B, the printed mat as a textured plane at z = 0 (base frame),
     optional mat placement error.
-  * Wrist camera: MuJoCo camera at T_EC_TWIN (the first arm's measured mount, 62 deg below the gripper axis; the model's
-    T_EC is the CAD value, T_EC_true=T_EC_NOMINAL gives a camera that matches it) with fovy chosen to match a given focal
+  * Wrist camera: MuJoCo camera at T_EC_TWIN (the ROBOTIS CAD camera on its bracket, 38 deg below the gripper axis
+    = the design mount omx_model.T_EC; T_EC_error= makes it differ, as on a real arm) with fovy chosen to match a given focal
     length; OpenCV-convention intrinsics available as SimCamera.K. Zero distortion.
   * Hidden truth: pass kin_error / joint_offsets / T_EC_error / mat_error to make the "real" arm differ from the
     nominal model, then test the calibration pipeline against ground_truth().
 
-Not modelled: gripper kinematics/contacts (gripper() only records the state), contact with anything placed in the cell (static
-visual geometry only), servo bus latency, backlash.
+Contacts (contacts=True): the arm links and a pen held along the tool axis (tip at the EE point, the nominal l4) collide with the
+bench, plate, mat surface and any free bodies placed in the cell, which can then be pushed over. The fingers stay non-colliding
+(they are fixed open for the camera; on the bench a pen attachment holds the pen). The arm starts folded at REST_Q. Default
+contacts=False: nothing collides, as in every lab.
+
+Clock: by default the twin keeps pace with the wall clock (reads advance the physics to real time, as on the bench).
+realtime=False instead advances it by BUS_DT for every read and by the requested time for settle(): runs are deterministic and
+faster than real time (a test harness can also map time.sleep onto settle()).
+
+Not modelled: gripper kinematics (gripper() only records the state), backlash.
 
 Coordinate conventions
   * World frame = OMX base frame {B} of omx_model.py: origin at the joint-1 axis on the plate top surface (mat
@@ -72,21 +80,20 @@ REST_VIA_Q = np.radians([0.0, -60.0, 60.0, -5.0])              # = omx_model.RES
 # roll axis (locked joint 5) and finger root along link 4
 J1_Z = 0.034; BASE_X = -0.01125; ROLL_X = 0.0287; FINGER_X = 0.0295; FINGER_Y = (0.0075, -0.0108)
 FINGER_OPEN_DEG = 30.0  # fingers fixed OPEN, turned about their pivots (URDF gripper_joint_1, _2 mirrored): as on the real arm, the
-                        # gripper stays open for camera work; closed (0), they fill the view of a camera at the measured mount
+                        # gripper stays open for camera work; closed (0), they hide most of the mat from the wrist camera
 STALL_TORQUE = np.array([1.4, 1.4, 1.4, 0.52])       # XL430-W250 x3, XL330-M288 (N m)
 STALL_CURRENT_A = np.array([1.3, 1.3, 1.3, 1.47])
-R_EC = np.array([[0, 0, 1], [-1, 0, 0], [0, -1, 0]])          # camera axes in {E} (columns), see omx_model.py
-T_EC_NOMINAL = np.eye(4); T_EC_NOMINAL[:3, :3] = R_EC; T_EC_NOMINAL[:3, 3] = [-0.030, 0.0, 0.040]   # = omx_model.T_EC (CAD)
-# The twin's TRUE camera mount, as measured on the first arm (baseline calibration, 30 Sep 2026: optical axis 61.7-61.9 deg
-# below the gripper axis, camera at ~(-23, -2, 20) mm in {E}): the students' model keeps the CAD T_EC and, as on the real
-# arm, has to find this (Lab 2 Part D, refined in Lab 9). Pass T_EC_true=T_EC_NOMINAL for a twin whose camera matches the model.
+_a = np.radians(38.0)                                                          # = omx_model.MOUNT_DEG (ROBOTIS CAD camera)
+T_EC_NOMINAL = np.eye(4)                                                       # = omx_model.T_EC (the design mount)
+T_EC_NOMINAL[:3, :3] = [[0, -np.sin(_a), np.cos(_a)], [-1, 0, 0], [0, -np.cos(_a), -np.sin(_a)]]
+T_EC_NOMINAL[:3, 3] = [-0.0459, 0.0, 0.0332]
+# The twin's TRUE camera mount: the design mount (pass T_EC_error to make it differ, as on a real arm, for calibration practice).
 # Copied in tasks.T_EC_TWIN_A (synthetic camera frames); check_consistency keeps them equal.
-TWIN_MOUNT_DEG = 62.0
-_a = np.radians(TWIN_MOUNT_DEG)
-T_EC_TWIN = np.eye(4)
-T_EC_TWIN[:3, :3] = [[0, -np.sin(_a), np.cos(_a)], [-1, 0, 0], [0, -np.cos(_a), -np.sin(_a)]]
-T_EC_TWIN[:3, 3] = [-0.023, -0.002, 0.020]
+TWIN_MOUNT_DEG = 38.0
+T_EC_TWIN = T_EC_NOMINAL.copy()
 TORQUE_PER_AMP = STALL_TORQUE / STALL_CURRENT_A     # per joint
+PEN_R, PEN_L = 0.003, 0.035               # pen held along the tool axis (contacts=True): tip radius, length beyond the fingers (m); tip = EE point
+BUS_DT = 0.004                             # realtime=False: simulated time one bus read costs (s)
 RAD_PER_TICK = 2 * np.pi / 4096
 VEL_UNIT = 0.229 * 2 * np.pi / 60          # rad/s per Dynamixel profile-velocity unit
 
@@ -119,8 +126,10 @@ def _object_geoms(objects):
 
 def build_mjcf(kin=NOMINAL, T_EC=T_EC_NOMINAL, mat_T=np.eye(4), cam_res=(1280, 720), cam_f_px=950.0,
                damping=0.05, frictionloss=0.1, armature=0.01, tau_max=STALL_TORQUE, mat_flip=(False, False),
-               timestep=0.001, objects=(), finger_open_deg=None):
-    """Return the MJCF XML string for the cell. All lengths in metres. tau_max: per-joint motor limits (N m)."""
+               timestep=0.001, objects=(), finger_open_deg=None, contacts=False):
+    """Return the MJCF XML string for the cell. All lengths in metres. tau_max: per-joint motor limits (N m).
+    contacts: the arm links and the pen collide with the cell and with free bodies in it (collision groups: arm 2, cell 4,
+    objects 1; see the module docstring)."""
     d1, l2z, l2x, l3, l4 = (kin[k] for k in ('d1', 'l2z', 'l2x', 'l3', 'l4'))
     tau_max = np.broadcast_to(np.asarray(tau_max, float), (4,))
     meshes = "\n    ".join(f'<mesh name="{m}" file="{m}.stl" scale="0.001 0.001 0.001"/>' for m in MESHES)
@@ -143,11 +152,21 @@ def build_mjcf(kin=NOMINAL, T_EC=T_EC_NOMINAL, mat_T=np.eye(4), cam_res=(1280, 7
     Px0, Px1 = MAT_CENTRE[0] - PLATE[0] / 2, MAT_CENTRE[0] + PLATE[0] / 2
     Py0, Py1 = -PLATE[1] / 2, PLATE[1] / 2
     zf = FRAME_T / 2
+    # collision groups (contacts=True): arm and pen contype 2; an invisible infinite floor at the mat surface 4; bench, plate and frame
+    # 8 (the stands stand on the floor, even where a foot overhangs the plate or the A3 mat); placed objects contype 1, conaffinity 7
+    # (each other, the arm, the floor). The arm never collides with itself, the cell never with itself.
+    cell_c = ' contype="8" conaffinity="2"' if contacts else ''        # bench, plate, frame: obstacles for the arm only
+    mat_c = ''                                                         # the textured mat is visual: its plane collides only within its size
+    floor = ('<geom name="floor" type="plane" size="0 0 1" pos="0 0 0.0003" rgba="0 0 0 0" contype="4" conaffinity="3"/>'
+             if contacts else '')                                      # invisible infinite plane at the mat surface: the arm and the stands
+    arm_c = ' contype="2" conaffinity="0"' if contacts else ''
+    pen = (f'<geom name="pen" type="capsule" fromto="{l4 - PEN_L:.5f} 0 0 {l4 - PEN_R:.5f} 0 0" size="{PEN_R:.4f}" rgba="0.15 0.25 0.75 1"'
+           f'{arm_c} density="0" condim="3"/>') if contacts else ''
     frame = f"""
-    <geom name="frameL" type="box" size="{(fx0-Px0)/2:.4f} {PLATE[1]/2:.4f} {zf:.4f}" pos="{(Px0+fx0)/2:.4f} 0 {zf:.4f}" material="frame"/>
-    <geom name="frameR" type="box" size="{(Px1-fx1)/2:.4f} {PLATE[1]/2:.4f} {zf:.4f}" pos="{(Px1+fx1)/2:.4f} 0 {zf:.4f}" material="frame"/>
-    <geom name="frameF" type="box" size="{SHEET[0]/2:.4f} {(fy0-Py0)/2:.4f} {zf:.4f}" pos="{MAT_CENTRE[0]:.4f} {(Py0+fy0)/2:.4f} {zf:.4f}" material="frame"/>
-    <geom name="frameB" type="box" size="{SHEET[0]/2:.4f} {(Py1-fy1)/2:.4f} {zf:.4f}" pos="{MAT_CENTRE[0]:.4f} {(Py1+fy1)/2:.4f} {zf:.4f}" material="frame"/>"""
+    <geom name="frameL" type="box" size="{(fx0-Px0)/2:.4f} {PLATE[1]/2:.4f} {zf:.4f}" pos="{(Px0+fx0)/2:.4f} 0 {zf:.4f}" material="frame"{cell_c}/>
+    <geom name="frameR" type="box" size="{(Px1-fx1)/2:.4f} {PLATE[1]/2:.4f} {zf:.4f}" pos="{(Px1+fx1)/2:.4f} 0 {zf:.4f}" material="frame"{cell_c}/>
+    <geom name="frameF" type="box" size="{SHEET[0]/2:.4f} {(fy0-Py0)/2:.4f} {zf:.4f}" pos="{MAT_CENTRE[0]:.4f} {(Py0+fy0)/2:.4f} {zf:.4f}" material="frame"{cell_c}/>
+    <geom name="frameB" type="box" size="{SHEET[0]/2:.4f} {(Py1-fy1)/2:.4f} {zf:.4f}" pos="{MAT_CENTRE[0]:.4f} {(Py1+fy1)/2:.4f} {zf:.4f}" material="frame"{cell_c}/>"""
     return f"""
 <mujoco model="elec3901_omx_cell">
   <compiler angle="radian" autolimits="true"/>
@@ -170,16 +189,17 @@ def build_mjcf(kin=NOMINAL, T_EC=T_EC_NOMINAL, mat_T=np.eye(4), cam_res=(1280, 7
   <default>
     <joint type="hinge" damping="{damping}" frictionloss="{frictionloss}" armature="{armature}"/>
     <geom contype="0" conaffinity="0"/>
-    <default class="arm"><geom type="mesh" material="arm" density="0"/></default>
+    <default class="arm"><geom type="mesh" material="arm" density="0"{arm_c}/></default>
+    <default class="finger"><geom type="mesh" material="arm" density="0"/></default>
   </default>
   <worldbody>
     <light pos="0.3 0.2 1.2" dir="-0.2 -0.1 -1" diffuse="0.7 0.7 0.7" specular="0.2 0.2 0.2"/>
     <light pos="-0.2 -0.4 1.0" dir="0.2 0.4 -1" diffuse="0.4 0.4 0.4" directional="false"/>
-    <geom name="bench" type="box" size="0.6 0.45 {BENCH_T/2:.4f}" pos="{MAT_CENTRE[0]:.4f} 0 {z_bench:.4f}" material="bench"/>
-    <geom name="plateA" type="box" size="{PLATE[0]/2:.4f} {PLATE[1]/2:.4f} {PLATE[2]/2:.4f}" pos="{MAT_CENTRE[0]:.4f} 0 {z_plate:.4f}" material="plate"/>
+    <geom name="bench" type="box" size="0.6 0.45 {BENCH_T/2:.4f}" pos="{MAT_CENTRE[0]:.4f} 0 {z_bench:.4f}" material="bench"{cell_c}/>
+    <geom name="plateA" type="box" size="{PLATE[0]/2:.4f} {PLATE[1]/2:.4f} {PLATE[2]/2:.4f}" pos="{MAT_CENTRE[0]:.4f} 0 {z_plate:.4f}" material="plate"{cell_c}/>
     {frame}
-    <geom name="mat" type="plane" size="{SHEET[0]/2:.4f} {SHEET[1]/2:.4f} 0.01" pos="{mat_pos[0]:.5f} {mat_pos[1]:.5f} {mat_pos[2]+0.0003:.5f}" quat="{_quat_wxyz(mat_T[:3,:3])}" material="mat"/>
-    {_object_geoms(objects)}
+    <geom name="mat" type="plane" size="{SHEET[0]/2:.4f} {SHEET[1]/2:.4f} 0.01" pos="{mat_pos[0]:.5f} {mat_pos[1]:.5f} {mat_pos[2]+0.0003:.5f}" quat="{_quat_wxyz(mat_T[:3,:3])}" material="mat"{mat_c}/>
+    {floor}
     <camera name="overhead" pos="{MAT_CENTRE[0]:.4f} 0 0.75" fovy="40"/>
     <!-- OMX-F (ROBOTIS menagerie meshes + inertials). World origin = joint-1 axis on the mounting plane. -->
     <body name="link0" pos="{BASE_X:.5f} 0 0">
@@ -206,21 +226,23 @@ def build_mjcf(kin=NOMINAL, T_EC=T_EC_NOMINAL, mat_T=np.eye(4), cam_res=(1280, 7
                 <geom mesh="follower_06_pan_Revised" class="arm"/>
                 <body name="finger1" pos="{FINGER_X:.5f} {FINGER_Y[0]:.5f} 0" euler="0 0 {_fo:.5f}">
                   <inertial pos="0.016164565 0.0012731032 0.00027291598" mass="0.012090677" diaginertia="2.7083287e-06 6.8733728e-06 4.6941881e-06"/>
-                  <geom mesh="follower_07_gripper_motorized" class="arm"/>
+                  <geom mesh="follower_07_gripper_motorized" class="finger"/>
                 </body>
                 <body name="finger2" pos="{FINGER_X:.5f} {FINGER_Y[1]:.5f} 0" euler="0 0 {-_fo:.5f}">
                   <inertial pos="0.016164565 0.0012731032 0.00027291598" mass="0.012090677" diaginertia="2.7083287e-06 6.8733728e-06 4.6941881e-06"/>
-                  <geom mesh="follower_08_gripper_gear" class="arm"/>
+                  <geom mesh="follower_08_gripper_gear" class="finger"/>
                 </body>
               </body>
+              {pen}
               <site name="ee" pos="{l4:.5f} 0 0" size="0.003"/>
               <camera name="wrist" pos="{cam_pos[0]:.5f} {cam_pos[1]:.5f} {cam_pos[2]:.5f}" quat="{_quat_wxyz(R_mj)}" fovy="{fovy:.4f}"/>
-              <geom type="box" size="0.012 0.012 0.008" pos="{cam_pos[0]:.5f} {cam_pos[1]:.5f} {cam_pos[2]:.5f}" mass="0.03" rgba="0.2 0.2 0.25 1"/>
             </body>
           </body>
         </body>
       </body>
     </body>
+    <!-- objects placed in the cell: after the arm, so that free bodies' joints follow the arm's in qpos (qpos[:4] = the arm) -->
+    {_object_geoms(objects)}
   </worldbody>
   <actuator>
     <motor name="m1" joint="j1" ctrlrange="-{tau_max[0]:.3f} {tau_max[0]:.3f}"/>
@@ -238,7 +260,7 @@ class OMXSim:
 
     def __init__(self, view=False, kin_error=None, joint_offsets=None, T_EC_error=None, mat_error=None, T_EC_true=None,
                  kp=(40, 60, 40, 15), kv=(1.0, 1.5, 1.0, 0.4), tau_max=STALL_TORQUE, cam_res=(1280, 720),
-                 cam_f_px=950.0, mat_flip=(False, False), objects=None, **mjcf_kw):
+                 cam_f_px=950.0, mat_flip=(False, False), objects=None, contacts=False, realtime=True, **mjcf_kw):
         if not _MJ:
             raise ImportError('pip install mujoco')
         self.kin = dict(NOMINAL); self.kin.update(kin_error or {})
@@ -249,7 +271,7 @@ class OMXSim:
         self.cam_res = cam_res
         self.objects = objects if objects is not None else []         # static objects in the cell (a list with .mjcf(), .truth())
         xml = build_mjcf(self.kin, self.T_EC_true, self.mat_T, cam_res, cam_f_px, tau_max=tau_max,
-                         mat_flip=mat_flip, objects=self.objects, **mjcf_kw)
+                         mat_flip=mat_flip, objects=self.objects, contacts=contacts, **mjcf_kw)
         assets = {'mat.png': open(MAT_PNG, 'rb').read()}
         for m in MESHES:
             assets[m + '.stl'] = open(os.path.join(MESH_DIR, m + '.stl'), 'rb').read()
@@ -268,6 +290,10 @@ class OMXSim:
         self._renderer = None
         self._rec = None                              # video recorder state, see record()
         self._t_sync = None                           # wall clock of the last step: reads catch the physics up (real time)
+        self.realtime = realtime                      # False: simulated clock (BUS_DT per read), see the module docstring
+        self.hooks = []                               # callables hook(sim) run after every physics step (recorders, time limits)
+        if contacts:                                  # start folded at rest, as on the bench (q = 0 would reach through the stands)
+            self.data.qpos[:4] = REST_Q + self.off
         mujoco.mj_forward(self.model, self.data)
         if view:
             from mujoco import viewer as mj_viewer        # not "import mujoco.viewer": that rebinds mujoco as a local
@@ -289,6 +315,8 @@ class OMXSim:
         for _ in range(n):
             self._servo_loop()
             mujoco.mj_step(self.model, self.data)
+            for h in self.hooks:
+                h(self)
             if self._rec is not None:
                 self._rec['k'] += 1
                 if self._rec['k'] >= self._rec['every']:
@@ -299,7 +327,12 @@ class OMXSim:
 
     def _catch_up(self, max_s=1.0):
         """Advance the physics to the wall clock (at most max_s at once), so non-blocking moves progress between reads the
-        way the real arm does - e.g. step_log() or a streaming loop that only calls move_q() and read_q()."""
+        way the real arm does - e.g. step_log() or a streaming loop that only calls move_q() and read_q().
+        With realtime=False every call costs BUS_DT of simulated time instead (once torque has been switched on)."""
+        if not self.realtime:
+            if self._t_sync is not None:
+                self.step(max(1, int(round(BUS_DT / self.dt))))
+            return
         if self._t_sync is None:
             return
         n = min(int((time.time() - self._t_sync) / self.dt), int(max_s / self.dt))
